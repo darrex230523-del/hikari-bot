@@ -47,11 +47,31 @@ st.title("Хикари")
 st.caption("Тихая нейросеть, которая поможет с учёбой и расскажет что-нибудь интересное")
 
 use_search = st.sidebar.checkbox("Искать в интернете и показывать источники", value=True)
-if st.sidebar.button("Очистить память диалога"):
-    st.session_state.messages = []
-    if os.path.exists(MEMORY_FILE):
-        os.remove(MEMORY_FILE)
+if "chats" not in st.session_state:
+    first_id = str(time.time())
+    st.session_state.chats = {first_id: {"title": "Новый чат", "messages": []}}
+    st.session_state.current_chat_id = first_id
+
+if st.sidebar.button("➕ Новый чат", use_container_width=True):
+    new_id = str(time.time())
+    st.session_state.chats[new_id] = {"title": "Новый чат", "messages": []}
+    st.session_state.current_chat_id = new_id
     st.rerun()
+
+st.sidebar.markdown("**Мои чаты:**")
+for cid, cdata in list(st.session_state.chats.items()):
+    col1, col2 = st.sidebar.columns([5, 1])
+    is_active = cid == st.session_state.current_chat_id
+    label = f"💬 {cdata['title']}" if is_active else cdata["title"]
+    if col1.button(label, key=f"sel_{cid}", use_container_width=True):
+        st.session_state.current_chat_id = cid
+        st.rerun()
+    if len(st.session_state.chats) > 1:
+        if col2.button("✕", key=f"del_{cid}", help="Удалить чат"):
+            del st.session_state.chats[cid]
+            if st.session_state.current_chat_id == cid:
+                st.session_state.current_chat_id = next(iter(st.session_state.chats))
+            st.rerun()
 
 
 def load_memory():
@@ -203,8 +223,9 @@ def search_internet(query):
 
 if "client" not in st.session_state:
     st.session_state.client = genai.Client()
-    st.session_state.messages = load_memory()
 
+current_chat = st.session_state.chats[st.session_state.current_chat_id]
+st.session_state.messages = current_chat["messages"]
 
 def show(m, idx):
     st.markdown(m["content"])
@@ -228,6 +249,10 @@ if prompt := st.chat_input("Напиши Хикари или прикрепи ф
     user_msg = {"role": "user", "content": text}
     if img_b64:
         user_msg["image_b64"] = img_b64
+
+    if current_chat["title"] == "Новый чат":
+        short_title = text[:26] + ("..." if len(text) > 26 else "")
+        current_chat["title"] = short_title
 
     st.session_state.messages.append(user_msg)
     save_memory(st.session_state.messages)
