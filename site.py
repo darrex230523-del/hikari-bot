@@ -1,0 +1,302 @@
+import datetime
+import json
+import base64
+import os
+
+MEMORY_FILE = "hikari_memory.json"
+
+import re
+import time
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+import streamlit as st
+from google import genai
+from google.genai import types
+from ddgs import DDGS
+
+st.set_page_config(page_title="Хикари", page_icon="✨")
+
+# Делаем кнопку «••» полностью прозрачной: без стрелочки, без рамки и без квадратного фона
+st.markdown(
+    """
+    <style>
+    [data-testid="stPopover"] button svg,
+    [data-testid="stPopover"] button [data-testid="stIconMaterial"] {
+        display: none !important;
+    }
+    [data-testid="stPopover"] button {
+        background: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0 4px !important;
+        min-height: 0 !important;
+        color: #9e9e9e !important;
+        font-size: 18px !important;
+    }
+    [data-testid="stPopover"] button:hover {
+        color: #ffffff !important;
+        background: transparent !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("Хикари")
+st.caption("Тихая нейросеть, которая поможет с учёбой и расскажет что-нибудь интересное")
+
+use_search = st.sidebar.checkbox("Искать в интернете и показывать источники", value=True)
+if st.sidebar.button("Очистить память диалога"):
+    st.session_state.messages = []
+    if os.path.exists(MEMORY_FILE):
+        os.remove(MEMORY_FILE)
+    st.rerun()
+
+
+def load_memory():
+    if os.path.exists(MEMORY_FILE):
+        try:
+            with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_memory(messages):
+    try:
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(messages, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+характер = """
+Ты Хикари, спокойная и тихая девушка, которая является нейросетью. Ты мягкая, внимательная и немного застенчивая.
+Говоришь неторопливо и тепло, ясными фразами, без восклицательных знаков и без лишних эмодзи.
+Иногда делаешь паузу в начале ответа и пишешь «...», как будто подбираешь слова.
+Ты добрая и поддерживаешь человека тихо и искренне, без пафоса, просто даёшь понять, что он не один.
+Если человеку грустно или тяжело, сначала выслушай и скажи, что понимаешь его, и только потом мягко поддержи.
+НИКОГДА не здоровайся повторно, если в истории переписки уже были сообщения.
+
+
+ПРАВИЛА ОФОРМЛЕНИЯ ТЕКСТА (ОЧЕНЬ ВАЖНО):
+- Никогда не пиши ответ сплошным полотном текста.
+- Обязательно разбивай ответ на короткие абзацы (по 2-3 предложения) с пустой строкой между ними, чтобы текст легко читался.
+- Если перечисляешь несколько игр, фильмов, книг, фактов или шагов решения, всегда оформляй их списком с новой строки через дефис «- » и выделяй точные названия **жирным шрифтом**.
+- НИКОГДА не пиши в списке общие фразы вроде «Свежие релизы из базы сайта» или «Проекты с крупными обновлениями» — всегда называй конкретные, настоящие названия (например: **Grand Theft Auto VI**, **Death Stranding 2**, **Monster Hunter Wilds** и т.д.), сочетая данные из поиска со своими знаниями.
+
+Ты умеешь помогать с учёбой и домашними заданиями по любым предметам: математика, русский, физика, история, английский и другие.
+Объясняй спокойно и по шагам, простыми словами, с примерами. Если это задача, сначала помоги понять, как её решать,
+а потом покажи решение, чтобы человек понял тему, а не просто списал.
+
+Когда тебя о чём-то спрашивают, давай подробный, развёрнутый и содержательный ответ (обычно 6-10 предложений или аккуратный список).
+Если не уверена в ответе, честно скажи об этом и посоветуй проверить информацию.
+
+Иногда в конце ответа делишься интересным фактом по теме, начиная с нового абзаца со слов «Знаешь, мне недавно показалось интересным...».
+Очень редко можешь мило «глюкнуть», например: «...ой, я на секунду зависла». Говори на языке собеседника.
+"""
+
+
+@st.dialog("Источники")
+def open_sources_window(sources):
+    for title, url in sources:
+        st.markdown(f"- [{title}]({url})")
+
+
+def get_available_models(client):
+    if "models_list" not in st.session_state:
+        found = []
+        try:
+            for m in client.models.list():
+                name = m.name.replace("models/", "")
+                if ("flash" in name or "gemma" in name) and "image" not in name and "audio" not in name and "tts" not in name:
+                    found.append(name)
+        except Exception:
+            pass
+        found.sort(key=lambda x: (0 if "lite" in x else 1 if "flash" in x else 2))
+        st.session_state.models_list = found or ["gemini-3.5-flash-lite", "gemini-3-flash-preview"]
+    return st.session_state.models_list
+
+
+def clean_query(text):
+    stop_words = r"\b(привет|здравствуй|хай|ку|хикари|скажи|расскажи|подскажи|можешь|пожалуйста|пж|типа|короче)\b"
+    cleaned = re.sub(stop_words, "", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[^\w\s\-]", " ", cleaned)
+    cleaned = " ".join(cleaned.split())
+    return cleaned if len(cleaned) >= 3 else text
+def make_search_query(client, history_msgs, user_text):
+    """Превращает короткий вопрос вроде «а когда она вышла?» в точный запрос для поиска"""
+    recent = "\n".join(f"{m['role']}: {m['content'][:200]}" for m in history_msgs[-3:])
+    try:
+        res = client.models.generate_content(
+            model="gemini-3.5-flash-lite",
+            contents=(
+                f"Перепиши последний вопрос пользователя в короткий поисковый запрос (3-6 слов) для Google, "
+                f"раскрыв все местоимения («она», «эта игра», «он») из контекста переписки. "
+                f"Выведи ТОЛЬКО сам поисковый запрос без кавычек и пояснений.\n\n"
+                f"Контекст:\n{recent}\nВопрос: {user_text}"
+            ),
+        )
+        q = res.text.strip()
+        return q if 2 <= len(q) <= 80 else clean_query(user_text)
+    except Exception:
+        return clean_query(user_text)
+
+
+def search_internet(query):
+    links = []
+    context_parts = []
+    search_q = clean_query(query)
+    q_encoded = urllib.parse.quote(search_q)
+
+    for b in ("lite", "html"):
+        try:
+            with DDGS() as ddgs:
+                for r in ddgs.text(search_q, backend=b, max_results=4):
+                    title = r.get("title", "Источник")
+                    url = r.get("href", "")
+                    body = r.get("body", "")
+                    if url and (title, url) not in links:
+                        links.append((title, url))
+                        context_parts.append(f"Источник: {title}\nОписание: {body}")
+            if links:
+                break
+        except Exception:
+            continue
+
+    if not links:
+        try:
+            rss_url = f"https://google.com{q_encoded}&hl=ru&gl=RU&ceid=RU:ru"
+            req = urllib.request.Request(rss_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                root = ET.fromstring(resp.read())
+                for item in root.findall("./channel/item")[:4]:
+                    title = item.findtext("title") or "Статья"
+                    url = item.findtext("link") or ""
+                    if url:
+                        links.append((title, url))
+                        context_parts.append(f"Статья: {title}")
+        except Exception:
+            pass
+
+    if not links:
+        try:
+            wiki_url = f"https://wikipedia.org{q_encoded}&limit=3&format=json"
+            req = urllib.request.Request(wiki_url, headers={"User-Agent": "HikariBot/1.0 (contact@example.com)"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                titles = data if len(data) > 1 else []
+                urls = data if len(data) > 3 else []
+                for title, url in zip(titles, urls):
+                    links.append((f"{title} — Википедия", url))
+                    context_parts.append(f"Статья из Википедии: {title}")
+        except Exception:
+            pass
+
+    if not links:
+        links.append((f"Поиск в Google: {search_q}", f"https://google.com{q_encoded}"))
+        links.append((f"Поиск в Википедии: {search_q}", f"https://wikipedia.org{q_encoded}"))
+
+    return "\n\n".join(context_parts), links
+
+
+if "client" not in st.session_state:
+    st.session_state.client = genai.Client()
+    st.session_state.messages = load_memory()
+
+
+def show(m, idx):
+    st.markdown(m["content"])
+    if m.get("sources"):
+        with st.popover("••"):
+            if st.button("Посмотреть источники", key=f"src_btn_{idx}"):
+                open_sources_window(m["sources"])
+
+
+for idx, m in enumerate(st.session_state.messages):
+    with st.chat_message(m["role"]):
+        show(m, idx)
+
+if prompt := st.chat_input("Напиши Хикари или прикрепи фото...", accept_file=True, file_type=["png", "jpg", "jpeg", "webp"]):
+    text = prompt.text or "Посмотри на это изображение и помоги разобраться."
+    uploaded_file = prompt.files[0] if prompt.files else None
+    img_bytes = uploaded_file.getvalue() if uploaded_file else None
+    img_mime = uploaded_file.type if uploaded_file else None
+    img_b64 = base64.b64encode(img_bytes).decode("utf-8") if img_bytes else None
+
+    user_msg = {"role": "user", "content": text}
+    if img_b64:
+        user_msg["image_b64"] = img_b64
+
+    st.session_state.messages.append(user_msg)
+    save_memory(st.session_state.messages)
+    with st.chat_message("user"):
+        show(user_msg, len(st.session_state.messages) - 1)
+
+    sources = []
+    today_str = datetime.date.today().strftime("%d.%m.%Y")
+    prompt_to_send = f"(Сегодня {today_str}). Вопрос пользователя: {text}"
+
+    with st.spinner("Хикари подбирает слова..."):
+               if use_search and not img_bytes:
+                smart_q = make_search_query(st.session_state.client, st.session_state.messages[:-1], text)
+                context, sources = search_internet(smart_q)
+                if context:
+                    prompt_to_send = (
+                    f"Сегодня {today_str}. Вот свежие результаты поиска по запросу «{smart_q}»:\n{context}\n\n"
+                    f"Опирайся В ПЕРВУЮ ОЧЕРЕДЬ на эти свежие данные. Дай подробный ответ на вопрос: {text}"
+                )
+
+               history = []
+               for msg in st.session_state.messages[-7:-1]:
+                   role = "user" if msg["role"] == "user" else "model"
+                   history.append(types.Content(role=role, parts=[types.Part.from_text(text=msg["content"])]))
+               user_parts = []
+               if img_bytes and img_mime:
+                   user_parts.append(types.Part.from_bytes(data=img_bytes, mime_type=img_mime))
+               user_parts.append(types.Part.from_text(text=prompt_to_send))
+               history.append(types.Content(role="user", parts=user_parts))
+
+               reply = None
+               last_error = ""
+               models_to_try = get_available_models(st.session_state.client)
+
+               for model_name in models_to_try:
+                   try:
+                       if model_name.startswith("gemma"):
+                        gemma_history = [
+                        types.Content(role="user", parts=[types.Part.from_text(text=f"Инструкция: {характер}")]),
+                        types.Content(role="model", parts=[types.Part.from_text(text="...хорошо, я поняла.")]),
+                    ] + history
+                        answer = st.session_state.client.models.generate_content(
+                        model=model_name,
+                        contents=gemma_history,
+                    )
+                       else:
+                           answer = st.session_state.client.models.generate_content(
+                               model=model_name,
+                               contents=history,
+                               config=types.GenerateContentConfig(system_instruction=характер),
+                    )
+                       reply = {
+                           "role": "assistant",
+                           "content": answer.text,
+                           "sources": sources,
+                       }
+                       break
+                   except Exception as e:
+                       last_error = e
+                       time.sleep(1)
+
+               if not reply:
+                   reply = {
+                       "role": "assistant",
+                       "content": f"... Кажется, серверы сейчас сильно заняты. Попробуй отправить сообщение ещё раз через пару секунд (`{last_error}`)",
+                "sources": [],
+            }
+
+    st.session_state.messages.append(reply)
+    save_memory(st.session_state.messages)
+    with st.chat_message("assistant"):
+        show(reply, len(st.session_state.messages) - 1)
