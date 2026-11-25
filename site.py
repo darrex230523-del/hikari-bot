@@ -60,7 +60,7 @@ if st.sidebar.button("➕ Новый чат", use_container_width=True):
 
 st.sidebar.markdown("**Мои чаты:**")
 for cid, cdata in list(st.session_state.chats.items()):
-    col1, col2 = st.sidebar.columns([5, 1])
+    col1, col2 = st.sidebar.columns([4, 1])
     is_active = cid == st.session_state.current_chat_id
     label = f"💬 {cdata['title']}" if is_active else cdata["title"]
     if col1.button(label, key=f"sel_{cid}", use_container_width=True):
