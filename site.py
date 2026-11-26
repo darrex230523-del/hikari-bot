@@ -1,6 +1,8 @@
 import datetime
 import json
 import base64
+import asyncio
+import edge_tts
 import os
 
 MEMORY_FILE = "hikari_memory.json"
@@ -47,6 +49,7 @@ st.title("Хикари")
 st.caption("Тихая нейросеть, которая поможет с учёбой и расскажет что-нибудь интересное")
 
 use_search = st.sidebar.checkbox("Искать в интернете и показывать источники", value=True)
+use_voice = st.sidebar.checkbox("Озвучивать ответы голосом", value=True)
 if "chats" not in st.session_state:
     first_id = str(time.time())
     st.session_state.chats = {first_id: {"title": "Новый чат", "messages": []}}
@@ -217,9 +220,25 @@ if "client" not in st.session_state:
 
 current_chat = st.session_state.chats[st.session_state.current_chat_id]
 st.session_state.messages = current_chat["messages"]
+async def _tts_bytes(text):
+    clean_text = re.sub(r"[*#`~_]", "", text)
+    communicate = edge_tts.Communicate(clean_text, "ru-RU-SvetlanaNeural", rate="-5%", pitch="+3Hz")
+    audio_data = b""
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_data += chunk["data"]
+    return audio_data
+
+def make_voice(text):
+    try:
+        return asyncio.run(_tts_bytes(text))
+    except Exception:
+        return None
 
 def show(m, idx):
     st.markdown(m["content"])
+    if m.get("audio"):
+        st.audio(m["audio"], format="audio/mp3")
     if m.get("sources"):
         with st.popover("••"):
             if st.button("Посмотреть источники", key=f"src_btn_{idx}"):
@@ -230,6 +249,7 @@ for idx, m in enumerate(st.session_state.messages):
     with st.chat_message(m["role"]):
         show(m, idx)
 
+voice_input = st.audio_input("Сказать голосом")
 if prompt := st.chat_input("Напиши Хикари или прикрепи фото...", accept_file=True, file_type=["png", "jpg", "jpeg", "webp"]):
     text = prompt.text or "Посмотри на это изображение и помоги разобраться."
     uploaded_file = prompt.files[0] if prompt.files else None
@@ -256,7 +276,8 @@ if prompt := st.chat_input("Напиши Хикари или прикрепи ф
 
     with st.spinner("Хикари подбирает слова..."):
                is_question = "?" in text or bool(re.search(r"\b(кто|что|где|когда|почему|зачем|как|какие|какой|сколько|найди|поищи|расскажи|объясни|реши|помоги|посоветуй|покажи)\b", text, re.IGNORECASE))
-               if use_search and not img_bytes and is_question:
+               about_hikari = bool(re.search(r"\b(ты|тебе|тебя|твой|твоя|твоё|твои|у тебя)\b", text, re.IGNORECASE))
+               if use_search and not img_bytes and is_question and not about_hikari:
                 smart_q = make_search_query(st.session_state.client, st.session_state.messages[:-1], text)
                 context, sources = search_internet(smart_q)
                 if context:
@@ -272,6 +293,8 @@ if prompt := st.chat_input("Напиши Хикари или прикрепи ф
                user_parts = []
                if img_bytes and img_mime:
                    user_parts.append(types.Part.from_bytes(data=img_bytes, mime_type=img_mime))
+               if voice_input:
+                   user_parts.append(types.Part.from_bytes(data=voice_input.getvalue(), mime_type="audio/wav"))
                user_parts.append(types.Part.from_text(text=prompt_to_send))
                history.append(types.Content(role="user", parts=user_parts))
 
@@ -300,6 +323,7 @@ if prompt := st.chat_input("Напиши Хикари или прикрепи ф
                            "role": "assistant",
                            "content": answer.text,
                            "sources": sources,
+                           "audio": make_voice(answer.text) if use_voice else None,
                        }
                        break
                    except Exception as e:
