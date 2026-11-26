@@ -2,3 +2,4 @@ streamlit
 google-genai
 ddgs
 pillow
+edge-tts
